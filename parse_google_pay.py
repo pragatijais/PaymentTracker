@@ -7,8 +7,16 @@ def parse_google_pay_html(html_file):
     with open(html_file, 'r', encoding='utf-8') as f:
         html_content = f.read()
     
+    # Find where the head section ends
+    head_end = html_content.find('</head>')
+    if head_end == -1:
+        return []
+    
+    # Get the content after </head>
+    content_after_head = html_content[head_end + 7:]  # 7 is length of '</head>'
+    
     # Parse HTML with BeautifulSoup
-    soup = BeautifulSoup(html_content, 'html.parser')
+    soup = BeautifulSoup(content_after_head, 'html.parser')
     
     # Find all transaction entries
     transactions = []
