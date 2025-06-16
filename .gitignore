@@ -1,3 +1,7 @@
+# Ignore output data files
+google_pay_transactions.csv
+*.csv
+
 # Python
 __pycache__/
 *.py[cod]
@@ -23,6 +27,7 @@ var/
 # Virtual Environment
 venv/
 ENV/
+.env/
 
 # IDE
 .idea/
