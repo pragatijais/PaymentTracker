@@ -1,16 +1,111 @@
 import os
-import logging
 from bs4 import BeautifulSoup
 import pandas as pd
 from datetime import datetime
 import csv
+import re
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+def parse_transaction_details(transaction_text, details_text):
+    """
+    Parse transaction text and details into structured data.
+    
+    Args:
+        transaction_text (str): Main transaction text
+        details_text (str): Transaction details text
+        
+    Returns:
+        dict: Parsed transaction data
+    """
+    # Initialize transaction data
+    transaction_data = {
+        'date': None,
+        'day': None,
+        'type': None,
+        'amount': None,
+        'currency': None,
+        'recipient': None,
+        'status': None,
+        'description': None
+    }
+    
+    # Multiple date patterns to try
+    date_patterns = [
+        r'([A-Za-z]{3} \d{1,2}, \d{4}, \d{1,2}:\d{2}:\d{2} [AP]M GMT\+\d{2}:\d{2})',  # Jan 20, 2023, 4:36:02 PM GMT+05:30
+        r'([A-Za-z]{3} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M GMT\+\d{2}:\d{2})',         # Jan 20, 2023, 4:36 PM GMT+05:30
+        r'([A-Za-z]{3} \d{1,2}, \d{4}, \d{1,2}:\d{2}:\d{2} [AP]M)',                    # Jan 20, 2023, 4:36:02 PM
+        r'([A-Za-z]{3} \d{1,2}, \d{4}, \d{1,2}:\d{2} [AP]M)',                          # Jan 20, 2023, 4:36 PM
+        r'([A-Za-z]{3} \d{1,2}, \d{4})'                                                # Jan 20, 2023
+    ]
+    
+    # Try each date pattern
+    date_str = None
+    for pattern in date_patterns:
+        date_match = re.search(pattern, details_text) or re.search(pattern, transaction_text)
+        if date_match:
+            date_str = date_match.group(1)
+            break
+    
+    if date_str:
+        try:
+            # Try different date formats
+            date_formats = [
+                '%b %d, %Y, %I:%M:%S %p GMT%z',  # Jan 20, 2023, 4:36:02 PM GMT+05:30
+                '%b %d, %Y, %I:%M %p GMT%z',     # Jan 20, 2023, 4:36 PM GMT+05:30
+                '%b %d, %Y, %I:%M:%S %p',        # Jan 20, 2023, 4:36:02 PM
+                '%b %d, %Y, %I:%M %p',           # Jan 20, 2023, 4:36 PM
+                '%b %d, %Y'                      # Jan 20, 2023
+            ]
+            
+            date_obj = None
+            for date_format in date_formats:
+                try:
+                    # Handle GMT offset format
+                    if 'GMT' in date_str:
+                        date_str = date_str.replace('GMT+', 'GMT+').replace('GMT-', 'GMT-')
+                        date_str = date_str.replace(':', '')
+                    date_obj = datetime.strptime(date_str, date_format)
+                    break
+                except ValueError:
+                    continue
+            
+            if date_obj:
+                transaction_data['date'] = date_obj.strftime('%Y-%m-%d %H:%M:%S')
+                transaction_data['day'] = date_obj.strftime('%A')
+        except Exception:
+            pass
+    
+    # Extract amount and currency
+    amount_match = re.search(r'([₹$€£])\s*([\d,]+\.?\d*)', transaction_text)
+    if amount_match:
+        transaction_data['currency'] = amount_match.group(1)
+        transaction_data['amount'] = amount_match.group(2).replace(',', '')
+    
+    # Determine transaction type
+    if 'paid' in transaction_text.lower():
+        transaction_data['type'] = 'Payment'
+    elif 'received' in transaction_text.lower():
+        transaction_data['type'] = 'Receipt'
+    elif 'sent' in transaction_text.lower():
+        transaction_data['type'] = 'Transfer'
+    
+    # Extract recipient/sender
+    recipient_match = re.search(r'(?:to|from)\s+([A-Za-z\s]+)', transaction_text)
+    if recipient_match:
+        transaction_data['recipient'] = recipient_match.group(1).strip()
+    
+    # Extract status
+    if 'completed' in details_text.lower():
+        transaction_data['status'] = 'Completed'
+    elif 'pending' in details_text.lower():
+        transaction_data['status'] = 'Pending'
+    elif 'failed' in details_text.lower():
+        transaction_data['status'] = 'Failed'
+    
+    # Store original texts
+    transaction_data['raw_transaction'] = transaction_text
+    transaction_data['raw_details'] = details_text
+    
+    return transaction_data
 
 def parse_google_pay_activity(html_file):
     """
@@ -23,33 +118,24 @@ def parse_google_pay_activity(html_file):
         pd.DataFrame: DataFrame containing the parsed transactions
     """
     try:
-        # Check if file exists
         if not os.path.exists(html_file):
             raise FileNotFoundError(f"HTML file not found: {html_file}")
-            
-        logger.info(f"Reading HTML file: {html_file}")
+        
         with open(html_file, 'r', encoding='utf-8') as file:
-            html_content = file.read()
-            
-        # Find the content after </head>
-        head_end = html_content.find('</head>')
+            content = file.read()
+        
+        head_end = content.find('</head>')
         if head_end == -1:
             raise ValueError("Could not find </head> tag in the HTML file")
-            
-        body_content = html_content[head_end + 7:]  # 7 is the length of </head>
         
-        # Parse the HTML content using BeautifulSoup
-        soup = BeautifulSoup(body_content, 'html.parser')
+        body_content = content[head_end + 7:]
+        soup = BeautifulSoup(body_content, 'lxml')
         
-        # Extract transaction details
         transactions = []
         transaction_divs = soup.find_all('div', class_='outer-cell mdl-cell mdl-cell--12-col mdl-shadow--2dp')
         
         if not transaction_divs:
-            logger.warning("No transaction entries found in the HTML file")
             return pd.DataFrame()
-            
-        logger.info(f"Found {len(transaction_divs)} transaction entries")
         
         for transaction_div in transaction_divs:
             main_info = transaction_div.find('div', class_='content-cell mdl-cell mdl-cell--6-col mdl-typography--body-1')
@@ -58,45 +144,25 @@ def parse_google_pay_activity(html_file):
             if main_info and details:
                 transaction_text = main_info.get_text(strip=True)
                 details_text = details.get_text(strip=True)
-                transactions.append({
-                    'transaction': transaction_text,
-                    'details': details_text
-                })
-            else:
-                logger.warning("Skipping transaction due to missing main info or details")
+                transaction_data = parse_transaction_details(transaction_text, details_text)
+                transactions.append(transaction_data)
         
         if not transactions:
-            logger.warning("No valid transactions were extracted")
             return pd.DataFrame()
-            
-        # Save the extracted data to a CSV file
-        output_file = 'google_pay_transactions.csv'
-        try:
-            with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
-                fieldnames = ['transaction', 'details']
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                writer.writeheader()
-                for transaction in transactions:
-                    writer.writerow(transaction)
-            logger.info(f"Successfully saved {len(transactions)} transactions to {output_file}")
-        except IOError as e:
-            logger.error(f"Error writing to CSV file: {e}")
-            raise
-            
-        return pd.DataFrame(transactions)
         
-    except Exception as e:
-        logger.error(f"An error occurred: {str(e)}")
-        raise
+        df = pd.DataFrame(transactions)
+        
+        if 'date' in df.columns and not df['date'].isna().all():
+            df = df.sort_values('date', ascending=False)
+        
+        output_file = 'google_pay_transactions.csv'
+        df.to_csv(output_file, index=False, encoding='utf-8')
+        
+        return df
+        
+    except Exception:
+        return pd.DataFrame()
 
 if __name__ == "__main__":
-    try:
-        html_file = "My Activity.html"
-        df = parse_google_pay_activity(html_file)
-        if not df.empty:
-            print(f"\nSuccessfully processed {len(df)} transactions")
-        else:
-            print("\nNo transactions were processed")
-    except Exception as e:
-        print(f"\nError: {str(e)}")
-        exit(1) 
+    html_file = "My Activity.html"
+    parse_google_pay_activity(html_file) 
